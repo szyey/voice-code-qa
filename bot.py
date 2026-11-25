@@ -2,7 +2,7 @@
 
 マイク → Silero VAD → faster-whisper(音声認識) → LLM → Windows標準の日本語音声 → ヘッドホン
 LLMは OpenCode Go(既定)か Claude(LLM_PROVIDER=claude)。必要に応じて search_code / read_file で
-指定フォルダのコードを調べて答える。音声認識と音声合成はPC内で動き、外に出るのはLLMへのテキストだけ。
+指定フォルダのコードを調べて答える。音声認識と音声合成はPC内で動く。読んだコードはLLMへ送り、秘密ファイルは除外する。
 
     python bot.py C:\\path\\to\\code    起動(ヘッドホン必須)
     python bot.py --check             キー・モデル・LLMの応答速度・音声認識(GPU)・日本語音声を確認
@@ -10,14 +10,16 @@ LLMは OpenCode Go(既定)か Claude(LLM_PROVIDER=claude)。必要に応じて s
 
 import argparse
 import asyncio
+import fnmatch
 import os
-import re
+import subprocess
 import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import regex as re
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -38,13 +40,19 @@ NO_THINKING = {"extra_body": {"thinking": {"type": "disabled"}}}
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo")  # 手元のfaster-whisperモデルのフォルダも指定可
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "auto")  # GPUで落ちるときは cpu
 TTS_VOICE = os.getenv("TTS_VOICE", "")  # Windowsの音声名の一部。空なら日本語の音声を自動選択
-TTS_RATE = int(os.getenv("TTS_RATE", "2"))  # -10(遅い)〜10(速い)
+try:
+    TTS_RATE = max(-10, min(10, int(os.getenv("TTS_RATE", "2"))))
+except ValueError:
+    TTS_RATE = 2
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", "target", ".next", ".idea"}
 MAX_FILE_BYTES = 1_000_000
 MAX_HITS = 25
 MAX_READ_LINES = 150
 MAX_TREE_FILES = 400
+REGEX_TIMEOUT = 0.05
+TOOL_CALLS = 0
+_TEXT_CACHE = {}
 
 def _t() -> str:
     """画面に出す時刻(どこで時間がかかったかを見るため)"""
@@ -63,6 +71,7 @@ SYSTEM_PROMPT = """あなたは、ユーザーとリアルタイムで音声会�
 
 コードの調べ方:
 - 質問がコードに関わるときは、推測で答えず、search_code や read_file で確認してから答える。
+- 最新のファイル一覧は list_files で確認する。file_glob で絞り込める。
 - ツールを呼ぶ前に、「確認しますね」のような一言だけ先に話す。
 - 調べるのはツール呼び出し4回までにする。広い質問は、まず search_code で絞ってから、必要な所だけ100行ほど読む。
 - 4回で足りなければ、分かった範囲で答えて、「もっと調べますか」と尋ねる。
@@ -75,15 +84,113 @@ SYSTEM_PROMPT = """あなたは、ユーザーとリアルタイムで音声会�
 
 # ---------------------------------------------------------------- コード参照ツール
 
-def _iter_files():
-    for dirpath, dirnames, filenames in os.walk(ROOT):
+def _is_secret(path: Path) -> bool:
+    for part in path.parts:
+        name = part.lower()
+        if name in {".env.example", ".env.sample", ".env.template"}:
+            continue
+        if any(fnmatch.fnmatchcase(name, pat) for pat in (
+            ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx",
+            "id_rsa*", "id_ed25519*", ".npmrc", ".pypirc", ".netrc",
+            "credentials*.json", "secrets.*", "*.secret", "client_secret*.json",
+        )):
+            return True
+    return False
+
+
+def _allowed(path: Path) -> bool:
+    try:
+        root = ROOT.resolve()
+        resolved = path.resolve()
+        return (resolved.is_relative_to(root)
+                and not _is_secret(path.relative_to(ROOT))
+                and not _is_secret(resolved.relative_to(root)))
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _resolved(path: Path) -> Path | None:
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _git_path() -> str | None:
+    excluded = {Path.cwd().resolve(), ROOT.resolve()}
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        directory = Path(entry)
+        if not entry or not directory.is_absolute():
+            continue
+        try:
+            if directory.resolve() in excluded:
+                continue
+            candidate = directory / ("git.exe" if sys.platform == "win32" else "git")
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate.resolve())
+        except (OSError, RuntimeError):
+            continue
+    return None
+
+
+def _iter_files(directory: Path | None = None, visited: set[Path] | None = None):
+    directory = ROOT if directory is None else directory
+    visited = set() if visited is None else visited
+    resolved_directory = _resolved(directory)
+    if resolved_directory is None or resolved_directory in visited:
+        return
+    visited.add(resolved_directory)
+    try:
+        git = _git_path()
+        if git is None:
+            raise FileNotFoundError
+        result = subprocess.run(
+            [git, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."],
+            cwd=directory, capture_output=True, check=True,
+        )
+        paths = sorted({os.fsdecode(p) for p in result.stdout.split(b"\0") if p})
+    except (OSError, subprocess.CalledProcessError):
+        paths = None
+    if paths is not None:
+        listed = {directory / name for name in paths}
+        for name in paths:
+            if not name or Path(name) == Path("."):
+                continue
+            path = directory / name
+            resolved = _resolved(path)
+            if resolved is None or resolved == resolved_directory:
+                continue
+            if any(part in SKIP_DIRS for part in path.relative_to(ROOT).parts[:-1]):
+                continue
+            if path.is_symlink() and resolved not in listed:
+                continue
+            if _allowed(path):
+                if path.is_file():
+                    yield path
+                elif (path.is_dir() and path.name not in SKIP_DIRS
+                      and (path / ".git").exists()):
+                    yield from _iter_files(path, visited)
+        return
+    yield from _walk_files(directory)
+
+
+def _walk_files(directory: Path):
+    for dirpath, dirnames, filenames in os.walk(directory):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
         for name in sorted(filenames):
-            yield Path(dirpath) / name
+            path = Path(dirpath) / name
+            if _allowed(path):
+                yield path
 
 
 def _read_text(path: Path) -> str | None:
     try:
+        stat = path.stat()
+        if stat.st_size > MAX_FILE_BYTES:
+            return None
+        key = (path, stat.st_mtime_ns, stat.st_size)
+        if key in _TEXT_CACHE:
+            return _TEXT_CACHE[key]
         data = path.read_bytes()
     except OSError:
         return None
@@ -91,10 +198,16 @@ def _read_text(path: Path) -> str | None:
         return None
     for enc in ("utf-8", "cp932"):
         try:
-            return data.decode(enc)
+            text = data.decode(enc)
+            break
         except UnicodeDecodeError:
             pass
-    return data.decode("utf-8", errors="replace")
+    else:
+        text = data.decode("utf-8", errors="replace")
+    if len(_TEXT_CACHE) >= 128:
+        _TEXT_CACHE.clear()
+    _TEXT_CACHE[key] = text
+    return text
 
 
 def _search(pattern: str, file_glob: str) -> str:
@@ -111,7 +224,11 @@ def _search(pattern: str, file_glob: str) -> str:
             continue
         rel = path.relative_to(ROOT).as_posix()
         for n, line in enumerate(text.splitlines(), 1):
-            if rx.search(line):
+            try:
+                matched = rx.search(line, timeout=REGEX_TIMEOUT)
+            except TimeoutError:
+                return "検索が時間切れになりました。もっと簡単なパターンにしてください。"
+            if matched:
                 hits.append(f"{rel}:{n}: {line.strip()[:200]}")
                 if len(hits) >= MAX_HITS:
                     return "\n".join(hits) + f"\n(上位{MAX_HITS}件で打ち切り。パターンを絞ってください)"
@@ -119,9 +236,14 @@ def _search(pattern: str, file_glob: str) -> str:
 
 
 def _read(path: str, start: int, end: int) -> str:
-    p = (ROOT / path).resolve()
-    if not (p.is_file() and p.is_relative_to(ROOT)):
+    p = _resolved(ROOT / path)
+    if p is None or not (_allowed(ROOT / path) and p.is_file()):
         return "ファイルが見つかりません。パスを確認してください。"
+    if not any(_resolved(candidate) == p for candidate in _iter_files()):
+        return "除外されたファイルは読めません。"
+    start, end = int(start), int(end)
+    if start > end:
+        start, end = end, start
     text = _read_text(p)
     if text is None:
         return "このファイルは読めません(バイナリか大きすぎます)。"
@@ -134,12 +256,44 @@ def _read(path: str, start: int, end: int) -> str:
     return f"{path} ({start}-{end}行 / 全{len(lines)}行)\n{body}"
 
 
-def _tree() -> str:
-    files = [p.relative_to(ROOT).as_posix() for p in _iter_files()]
+def _tree(file_glob: str = "") -> str:
+    files = [p.relative_to(ROOT).as_posix() for p in _iter_files()
+             if not file_glob or p.match(file_glob)]
     out = "\n".join(files[:MAX_TREE_FILES])
     if len(files) > MAX_TREE_FILES:
         out += f"\n...ほか{len(files) - MAX_TREE_FILES}ファイル"
-    return out
+    return out or "ファイルなし"
+
+
+async def _tool_result(params, func, *args):
+    global TOOL_CALLS
+    TOOL_CALLS += 1
+    if TOOL_CALLS > 4:
+        result = "調査は4回までです。分かった範囲で答えて「もっと調べますか」と尋ねてください。"
+    else:
+        try:
+            result = await asyncio.to_thread(func, *args)
+        except Exception:  # noqa: BLE001
+            result = "調査に失敗しました。引数やファイルを確認してください。"
+    await params.result_callback(result)
+
+
+def _trim_history(messages):
+    users = [i for i, m in enumerate(messages) if isinstance(m, dict) and m.get("role") == "user"]
+    if len(users) > 10:
+        messages[:] = messages[:users[0]] + messages[users[-10]:]
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "tool" and isinstance(m.get("content"), str) and len(m["content"]) > 400:
+            m["content"] = m["content"][:400] + "\n...(古い結果のため省略)"
+
+
+async def list_files(params, file_glob: str = ""):
+    """現在のファイル一覧を返す(最大400件)。
+
+    Args:
+        file_glob: 絞り込み用glob。空なら全ファイル。
+    """
+    await _tool_result(params, _tree, file_glob)
 
 
 # Pipecatは関数名・docstring・型注釈からLLM用のツール定義を自動生成する
@@ -151,10 +305,10 @@ async def search_code(params, pattern: str, file_glob: str = ""):
         file_glob: 対象ファイルを絞るglob。例は "*.py"。空なら全ファイルが対象。
     """
     print(f"{_t()}   [調査] search_code {pattern!r} {file_glob}", flush=True)
-    await params.result_callback(await asyncio.to_thread(_search, pattern, file_glob))
+    await _tool_result(params, _search, pattern, file_glob)
 
 
-async def read_file(params, path: str, start: int = 1, end: int = 200):
+async def read_file(params, path: str, start: int = 1, end: int = 150):
     """ファイルの指定した行範囲を、行番号つきで読む。一度に読めるのは最大150行。
 
     Args:
@@ -163,7 +317,7 @@ async def read_file(params, path: str, start: int = 1, end: int = 200):
         end: 終了行。
     """
     print(f"{_t()}   [調査] read_file {path} {start}-{end}", flush=True)
-    await params.result_callback(await asyncio.to_thread(_read, path, start, end))
+    await _tool_result(params, _read, path, start, end)
 
 
 # ---------------------------------------------------------------- 音声認識(faster-whisper)
@@ -194,23 +348,37 @@ def make_stt():
 
     _add_cuda_dll_dirs()
 
-    def build(device: str, compute_type: str):
+    def build(device: str, compute_type: str, model: str):
         return WhisperSTTService(
             device=device,
             compute_type=compute_type,
-            settings=WhisperSTTService.Settings(model=WHISPER_MODEL, language=Language.JA, no_speech_prob=0.5),
+            settings=WhisperSTTService.Settings(model=model, language=Language.JA, no_speech_prob=0.5),
         )
 
+    def warmup(stt):
+        model = getattr(stt, "_model", None)
+        if model is None:
+            logger.info("音声認識: モデル属性がないためウォームアップを省略します")
+            return
+        segments, _ = model.transcribe(np.zeros(16000, dtype=np.float32), language="ja")
+        list(segments)
+
     try:
-        stt = build(WHISPER_DEVICE, "default")
+        stt = build(WHISPER_DEVICE, "default", WHISPER_MODEL)
         t0 = time.perf_counter()
-        segments, _ = stt._model.transcribe(np.zeros(16000, dtype=np.float32), language="ja")
-        list(segments)  # 遅延評価なので、消費して初めて推論が走る
+        warmup(stt)
         logger.info(f"音声認識: {WHISPER_MODEL} / {WHISPER_DEVICE}(ウォームアップ{time.perf_counter() - t0:.1f}秒)")
         return stt
     except Exception as e:  # noqa: BLE001
         logger.warning(f"音声認識を {WHISPER_DEVICE} で動かせませんでした({type(e).__name__}: {e})。CPUで続行します。遅い場合は WHISPER_MODEL=small を試してください")
-        return build("cpu", "int8")
+        model = WHISPER_MODEL if "WHISPER_MODEL" in os.environ else "small"
+        logger.info(f"CPU用の音声認識モデル: {model}")
+        try:
+            stt = build("cpu", "int8", model)
+            warmup(stt)
+            return stt
+        except Exception as cpu_error:  # noqa: BLE001
+            sys.exit(f"CPUでも音声認識を起動できません。モデルと設定を確認してください({type(cpu_error).__name__})。")
 
 
 # ---------------------------------------------------------------- 音声合成(Windows標準 SAPI)
@@ -289,6 +457,10 @@ def make_tts():
         def can_generate_metrics(self) -> bool:
             return True
 
+        async def _handle_interruption(self, frame, direction):
+            await super()._handle_interruption(frame, direction)
+            self._idle_since = 0.0
+
         async def run_tts(self, text: str, context_id: str):
             print(f"{_t()}   ボット: {text}", flush=True)
             if sapi is None:
@@ -352,7 +524,8 @@ def _llm_model() -> str:
 
 async def _check_llm(client=None) -> bool:
     """LLMのキー・モデル名・応答速度を確認する。問題があればFalse。"""
-    fmt = lambda v: "-" if v is None else f"{v:.2f}s"  # noqa: E731
+    def fmt(v):
+        return "-" if v is None else f"{v:.2f}s"
     model = _llm_model()
 
     if LLM_PROVIDER == "claude":
@@ -414,7 +587,12 @@ async def _check_llm(client=None) -> bool:
 
 async def check(client=None) -> None:
     """LLMのキー・モデル一覧・応答速度、音声認識、日本語音声を確認する。"""
-    if not await _check_llm(client):
+    try:
+        ok = await _check_llm(client)
+    except Exception as e:  # noqa: BLE001
+        print(f"LLMに接続できません({type(e).__name__})。APIキー・ネット接続・モデル設定を確認してください。")
+        return
+    if not ok:
         return
     print("本文までが1秒を超えるなら、より軽いモデルに変えるのが近道です。\n")
 
@@ -438,7 +616,10 @@ async def run_bot() -> None:
         LLMContextAggregatorPair,
         LLMUserAggregatorParams,
     )
-    from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
+    from pipecat.transports.local.audio import (
+        LocalAudioTransport,
+        LocalAudioTransportParams,
+    )
     from pipecat.workers.runner import WorkerRunner
 
     stt = make_stt()
@@ -448,7 +629,7 @@ async def run_bot() -> None:
     )
     llm = make_llm()
 
-    context = LLMContext(tools=[search_code, read_file])
+    context = LLMContext(tools=[search_code, read_file, list_files])
     # 発話の検出はSilero VAD、話し終わりの判定はPipecat同梱のSmart Turn(どちらもローカル)
     user_agg, assistant_agg = LLMContextAggregatorPair(
         context, user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer())
@@ -460,12 +641,12 @@ async def run_bot() -> None:
 
     @user_agg.event_handler("on_user_turn_stopped")
     async def _show_user_text(aggregator, strategy, message):
+        global TOOL_CALLS
+        TOOL_CALLS = 0
         if message.content:
             print(f"{_t()} あなた: {message.content}", flush=True)
         # 前の質問で読んだコードは、LLMへの入力を重くして返事を遅くするので、頭の部分だけ残す
-        for m in context.messages:
-            if isinstance(m, dict) and m.get("role") == "tool" and isinstance(m.get("content"), str) and len(m["content"]) > 400:
-                m["content"] = m["content"][:400] + "\n...(古い結果のため省略)"
+        _trim_history(context.messages)
 
     pipeline = Pipeline(
         [transport.input(), stt, user_agg, llm, tts, transport.output(), assistant_agg]
