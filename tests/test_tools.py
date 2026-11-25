@@ -19,7 +19,7 @@ def root(tmp_path, monkeypatch):
 @pytest.mark.parametrize("name", [
     ".env", ".env.local", "a.pem", "a.key", "a.p12", "a.pfx",
     "id_rsa.pub", "id_ed25519", ".npmrc", ".pypirc", ".netrc",
-    "credentials-dev.json", "app_secrets.yaml",
+    "credentials-dev.json", "secrets.yaml", "config.secret", "client_secret-dev.json",
 ])
 def test_secrets(root, name):
     (root / name).write_text("sensitive")
@@ -33,6 +33,14 @@ def test_templates(root, name):
     (root / name).write_text("example")
     assert name in bot._tree()
     assert "example" in bot._read(name, 1, 150)
+
+
+@pytest.mark.parametrize("name", ["client_secret_handler.py", "secret_santa.py"])
+def test_secret_named_source_visible(root, name):
+    (root / name).write_text("visible_source")
+    assert name in bot._tree()
+    assert "visible_source" in bot._search("visible_source", "*.py")
+    assert "visible_source" in bot._read(name, 1, 150)
 
 
 def test_gitignore(root):

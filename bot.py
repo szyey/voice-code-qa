@@ -92,7 +92,7 @@ def _is_secret(path: Path) -> bool:
         if any(fnmatch.fnmatchcase(name, pat) for pat in (
             ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx",
             "id_rsa*", "id_ed25519*", ".npmrc", ".pypirc", ".netrc",
-            "credentials*.json", "*secret*",
+            "credentials*.json", "secrets.*", "*.secret", "client_secret*.json",
         )):
             return True
     return False
