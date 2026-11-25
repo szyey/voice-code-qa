@@ -81,6 +81,17 @@ def test_git_symlink_to_ignored_file(root):
     assert "hidden_value" not in bot._read("alias.txt", 1, 150)
 
 
+def test_git_skip_dirs(root):
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    for name in ("node_modules", "build"):
+        (root / name).mkdir()
+        (root / name / "file.py").write_text("skipped_value")
+    (root / "ok.py").write_text("visible")
+    assert bot._tree() == "ok.py"
+    assert bot._search("skipped_value", "") == "一致なし"
+    assert "skipped_value" not in bot._read("build/file.py", 1, 150)
+
+
 def test_symlink_escape(root, tmp_path_factory):
     outside = tmp_path_factory.mktemp("outside") / "code.py"
     outside.write_text("outside_value")

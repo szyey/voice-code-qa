@@ -149,6 +149,8 @@ def _iter_files():
         listed = {ROOT / name for name in paths}
         for name in paths:
             path = ROOT / name
+            if any(part in SKIP_DIRS for part in Path(name).parts):
+                continue
             if path.is_symlink() and _resolved(path) not in listed:
                 continue
             if _allowed(path) and path.is_file():
