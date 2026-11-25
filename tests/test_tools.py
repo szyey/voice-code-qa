@@ -92,6 +92,24 @@ def test_git_skip_dirs(root):
     assert "skipped_value" not in bot._read("build/file.py", 1, 150)
 
 
+def test_submodule_directory(root):
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run([
+        "git", "-C", str(root), "update-index", "--add", "--cacheinfo",
+        "160000,1111111111111111111111111111111111111111,library",
+    ], check=True)
+    library = root / "library"
+    library.mkdir()
+    (library / "code.py").write_text("library_value")
+    (library / ".env").write_text("private_value")
+    (library / "build").mkdir()
+    (library / "build" / "output.py").write_text("private_value")
+    assert bot._tree() == "library/code.py"
+    assert "library_value" in bot._search("library_value", "")
+    assert "library_value" in bot._read("library/code.py", 1, 150)
+    assert bot._search("private_value", "") == "一致なし"
+
+
 def test_symlink_escape(root, tmp_path_factory):
     outside = tmp_path_factory.mktemp("outside") / "code.py"
     outside.write_text("outside_value")

@@ -153,10 +153,17 @@ def _iter_files():
                 continue
             if path.is_symlink() and _resolved(path) not in listed:
                 continue
-            if _allowed(path) and path.is_file():
-                yield path
+            if _allowed(path):
+                if path.is_file():
+                    yield path
+                elif path.is_dir():
+                    yield from _walk_files(path)
         return
-    for dirpath, dirnames, filenames in os.walk(ROOT):
+    yield from _walk_files(ROOT)
+
+
+def _walk_files(directory: Path):
+    for dirpath, dirnames, filenames in os.walk(directory):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
         for name in sorted(filenames):
             path = Path(dirpath) / name
