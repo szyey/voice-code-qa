@@ -1,4 +1,5 @@
 import asyncio
+import os
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -14,6 +15,21 @@ def root(tmp_path, monkeypatch):
     monkeypatch.setattr(bot, "TOOL_CALLS", 0)
     bot._TEXT_CACHE.clear()
     return tmp_path
+
+
+def test_git_path_skips_untrusted_directories(root, monkeypatch):
+    trusted = root / "trusted"
+    trusted.mkdir()
+    name = "git.exe" if bot.sys.platform == "win32" else "git"
+    for directory in (root, trusted):
+        executable = directory / name
+        executable.touch()
+        executable.chmod(0o755)
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("PATH", os.pathsep.join(["", ".", "relative", str(root), str(trusted)]))
+    assert bot._git_path() == str(trusted / name)
+    monkeypatch.setenv("PATH", os.pathsep.join(["", ".", str(root)]))
+    assert bot._git_path() is None
 
 
 @pytest.mark.parametrize("name", [

@@ -105,10 +105,30 @@ def _allowed(path: Path) -> bool:
             and not _is_secret(path.resolve().relative_to(root)))
 
 
+def _git_path() -> str | None:
+    excluded = {Path.cwd().resolve(), ROOT.resolve()}
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        directory = Path(entry)
+        if not entry or not directory.is_absolute():
+            continue
+        try:
+            if directory.resolve() in excluded:
+                continue
+            candidate = directory / ("git.exe" if sys.platform == "win32" else "git")
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate.resolve())
+        except (OSError, RuntimeError):
+            continue
+    return None
+
+
 def _iter_files():
     try:
+        git = _git_path()
+        if git is None:
+            raise FileNotFoundError
         result = subprocess.run(
-            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."],
+            [git, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."],
             cwd=ROOT, capture_output=True, check=True,
         )
         paths = sorted({os.fsdecode(p) for p in result.stdout.split(b"\0") if p})
