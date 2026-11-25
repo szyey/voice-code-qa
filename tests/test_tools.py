@@ -71,6 +71,16 @@ def test_gitignore(root):
     assert "hidden" not in bot._read("ignored.py", 1, 150)
 
 
+def test_git_symlink_to_ignored_file(root):
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / ".gitignore").write_text("private.txt\n")
+    (root / "private.txt").write_text("hidden_value")
+    (root / "alias.txt").symlink_to(root / "private.txt")
+    assert "alias.txt" not in bot._tree()
+    assert bot._search("hidden_value", "") == "一致なし"
+    assert "hidden_value" not in bot._read("alias.txt", 1, 150)
+
+
 def test_symlink_escape(root, tmp_path_factory):
     outside = tmp_path_factory.mktemp("outside") / "code.py"
     outside.write_text("outside_value")

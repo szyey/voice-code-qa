@@ -135,8 +135,11 @@ def _iter_files():
     except (OSError, subprocess.CalledProcessError):
         paths = None
     if paths is not None:
+        listed = {ROOT / name for name in paths}
         for name in paths:
             path = ROOT / name
+            if path.is_symlink() and path.resolve() not in listed:
+                continue
             if _allowed(path) and path.is_file():
                 yield path
         return
