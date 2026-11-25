@@ -109,14 +109,20 @@ def test_submodule_directory(root):
     ], check=True)
     library = root / "library"
     library.mkdir()
+    subprocess.run(["git", "init", "-q", str(library)], check=True)
     (library / "code.py").write_text("library_value")
+    (library / ".gitignore").write_text("private.txt\n")
+    (library / "private.txt").write_text("private_value")
+    (library / "alias.txt").symlink_to(library / "private.txt")
     (library / ".env").write_text("private_value")
     (library / "build").mkdir()
     (library / "build" / "output.py").write_text("private_value")
-    assert bot._tree() == "library/code.py"
+    assert set(bot._tree().splitlines()) == {"library/.gitignore", "library/code.py"}
     assert "library_value" in bot._search("library_value", "")
     assert "library_value" in bot._read("library/code.py", 1, 150)
     assert bot._search("private_value", "") == "一致なし"
+    assert "private_value" not in bot._read("library/private.txt", 1, 150)
+    assert "private_value" not in bot._read("library/alias.txt", 1, 150)
 
 
 def test_symlink_escape(root, tmp_path_factory):

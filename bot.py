@@ -133,33 +133,34 @@ def _git_path() -> str | None:
     return None
 
 
-def _iter_files():
+def _iter_files(directory: Path | None = None):
+    directory = ROOT if directory is None else directory
     try:
         git = _git_path()
         if git is None:
             raise FileNotFoundError
         result = subprocess.run(
             [git, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."],
-            cwd=ROOT, capture_output=True, check=True,
+            cwd=directory, capture_output=True, check=True,
         )
         paths = sorted({os.fsdecode(p) for p in result.stdout.split(b"\0") if p})
     except (OSError, subprocess.CalledProcessError):
         paths = None
     if paths is not None:
-        listed = {ROOT / name for name in paths}
+        listed = {directory / name for name in paths}
         for name in paths:
-            path = ROOT / name
-            if any(part in SKIP_DIRS for part in Path(name).parts[:-1]):
+            path = directory / name
+            if any(part in SKIP_DIRS for part in path.relative_to(ROOT).parts[:-1]):
                 continue
             if path.is_symlink() and _resolved(path) not in listed:
                 continue
             if _allowed(path):
                 if path.is_file():
                     yield path
-                elif path.is_dir():
-                    yield from _walk_files(path)
+                elif path.is_dir() and path.name not in SKIP_DIRS:
+                    yield from _iter_files(path)
         return
-    yield from _walk_files(ROOT)
+    yield from _walk_files(directory)
 
 
 def _walk_files(directory: Path):
