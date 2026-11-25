@@ -125,6 +125,20 @@ def test_submodule_directory(root):
     assert "private_value" not in bot._read("library/alias.txt", 1, 150)
 
 
+def test_uninitialized_submodule(root):
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run([
+        "git", "-C", str(root), "update-index", "--add", "--cacheinfo",
+        "160000,1111111111111111111111111111111111111111,library",
+    ], check=True)
+    (root / "library").mkdir()
+    assert bot._tree() == "ファイルなし"
+    assert bot._search("anything", "") == "一致なし"
+    (root / "library" / "local.py").write_text("uninitialized_value")
+    assert bot._tree() == "ファイルなし"
+    assert "uninitialized_value" not in bot._read("library/local.py", 1, 150)
+
+
 def test_symlink_escape(root, tmp_path_factory):
     outside = tmp_path_factory.mktemp("outside") / "code.py"
     outside.write_text("outside_value")

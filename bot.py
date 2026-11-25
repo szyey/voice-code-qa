@@ -133,8 +133,13 @@ def _git_path() -> str | None:
     return None
 
 
-def _iter_files(directory: Path | None = None):
+def _iter_files(directory: Path | None = None, visited: set[Path] | None = None):
     directory = ROOT if directory is None else directory
+    visited = set() if visited is None else visited
+    resolved_directory = _resolved(directory)
+    if resolved_directory is None or resolved_directory in visited:
+        return
+    visited.add(resolved_directory)
     try:
         git = _git_path()
         if git is None:
@@ -149,16 +154,22 @@ def _iter_files(directory: Path | None = None):
     if paths is not None:
         listed = {directory / name for name in paths}
         for name in paths:
+            if not name or Path(name) == Path("."):
+                continue
             path = directory / name
+            resolved = _resolved(path)
+            if resolved is None or resolved == resolved_directory:
+                continue
             if any(part in SKIP_DIRS for part in path.relative_to(ROOT).parts[:-1]):
                 continue
-            if path.is_symlink() and _resolved(path) not in listed:
+            if path.is_symlink() and resolved not in listed:
                 continue
             if _allowed(path):
                 if path.is_file():
                     yield path
-                elif path.is_dir() and path.name not in SKIP_DIRS:
-                    yield from _iter_files(path)
+                elif (path.is_dir() and path.name not in SKIP_DIRS
+                      and (path / ".git").exists()):
+                    yield from _iter_files(path, visited)
         return
     yield from _walk_files(directory)
 
