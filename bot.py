@@ -99,10 +99,21 @@ def _is_secret(path: Path) -> bool:
 
 
 def _allowed(path: Path) -> bool:
-    root = ROOT.resolve()
-    return (path.resolve().is_relative_to(root)
-            and not _is_secret(path.relative_to(ROOT))
-            and not _is_secret(path.resolve().relative_to(root)))
+    try:
+        root = ROOT.resolve()
+        resolved = path.resolve()
+        return (resolved.is_relative_to(root)
+                and not _is_secret(path.relative_to(ROOT))
+                and not _is_secret(resolved.relative_to(root)))
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _resolved(path: Path) -> Path | None:
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return None
 
 
 def _git_path() -> str | None:
@@ -138,7 +149,7 @@ def _iter_files():
         listed = {ROOT / name for name in paths}
         for name in paths:
             path = ROOT / name
-            if path.is_symlink() and path.resolve() not in listed:
+            if path.is_symlink() and _resolved(path) not in listed:
                 continue
             if _allowed(path) and path.is_file():
                 yield path
@@ -204,10 +215,10 @@ def _search(pattern: str, file_glob: str) -> str:
 
 
 def _read(path: str, start: int, end: int) -> str:
-    p = (ROOT / path).resolve()
-    if not (p.is_file() and _allowed(ROOT / path)):
+    p = _resolved(ROOT / path)
+    if p is None or not (_allowed(ROOT / path) and p.is_file()):
         return "ファイルが見つかりません。パスを確認してください。"
-    if not any(candidate.resolve() == p for candidate in _iter_files()):
+    if not any(_resolved(candidate) == p for candidate in _iter_files()):
         return "除外されたファイルは読めません。"
     start, end = int(start), int(end)
     if start > end:

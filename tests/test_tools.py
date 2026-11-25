@@ -90,6 +90,17 @@ def test_symlink_escape(root, tmp_path_factory):
     assert "outside_value" not in bot._read("link.py", 1, 150)
 
 
+@pytest.mark.parametrize("git_repo", [False, True])
+def test_circular_symlink(root, git_repo):
+    if git_repo:
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "loop").symlink_to(root / "loop")
+    assert not bot._allowed(root / "loop")
+    assert "loop" not in bot._tree()
+    assert bot._search("anything", "") == "一致なし"
+    assert "見つかりません" in bot._read("loop", 1, 150)
+
+
 def test_ranges(root):
     (root / "code.py").write_text("\n".join(str(i) for i in range(300)))
     assert "(2-4行" in bot._read("code.py", "4", "2")
