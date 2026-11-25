@@ -1,4 +1,5 @@
-pipecat-ai[whisper,silero,openai,anthropic,local]>=1.12
+pipecat-ai[whisper,silero,openai,anthropic,local]~=1.16
+regex
 python-dotenv
 pywin32; sys_platform == "win32"
 # CUDA libraries for running faster-whisper on the RTX GPU (not needed if you only use the CPU)

@@ -2,7 +2,7 @@
 
 マイク → Silero VAD → faster-whisper(音声認識) → LLM → Windows標準の日本語音声 → ヘッドホン
 LLMは OpenCode Go(既定)か Claude(LLM_PROVIDER=claude)。必要に応じて search_code / read_file で
-指定フォルダのコードを調べて答える。音声認識と音声合成はPC内で動き、外に出るのはLLMへのテキストだけ。
+指定フォルダのコードを調べて答える。音声認識と音声合成はPC内で動く。読んだコードはLLMへ送り、秘密ファイルは除外する。
 
     python bot.py C:\\path\\to\\code    起動(ヘッドホン必須)
     python bot.py --check             キー・モデル・LLMの応答速度・音声認識(GPU)・日本語音声を確認
@@ -10,8 +10,8 @@ LLMは OpenCode Go(既定)か Claude(LLM_PROVIDER=claude)。必要に応じて s
 
 import argparse
 import asyncio
-import os
 import fnmatch
+import os
 import subprocess
 import sys
 import time
@@ -111,7 +111,7 @@ def _iter_files():
             ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "."],
             cwd=ROOT, capture_output=True, check=True,
         )
-        paths = sorted(set(os.fsdecode(p) for p in result.stdout.split(b"\0") if p))
+        paths = sorted({os.fsdecode(p) for p in result.stdout.split(b"\0") if p})
     except (OSError, subprocess.CalledProcessError):
         paths = None
     if paths is not None:
@@ -469,7 +469,8 @@ def _llm_model() -> str:
 
 async def _check_llm(client=None) -> bool:
     """LLMのキー・モデル名・応答速度を確認する。問題があればFalse。"""
-    fmt = lambda v: "-" if v is None else f"{v:.2f}s"  # noqa: E731
+    def fmt(v):
+        return "-" if v is None else f"{v:.2f}s"
     model = _llm_model()
 
     if LLM_PROVIDER == "claude":
@@ -560,7 +561,10 @@ async def run_bot() -> None:
         LLMContextAggregatorPair,
         LLMUserAggregatorParams,
     )
-    from pipecat.transports.local.audio import LocalAudioTransport, LocalAudioTransportParams
+    from pipecat.transports.local.audio import (
+        LocalAudioTransport,
+        LocalAudioTransportParams,
+    )
     from pipecat.workers.runner import WorkerRunner
 
     stt = make_stt()
