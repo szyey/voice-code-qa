@@ -92,6 +92,15 @@ def test_git_skip_dirs(root):
     assert "skipped_value" not in bot._read("build/file.py", 1, 150)
 
 
+def test_git_keeps_file_named_build(root):
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "scripts").mkdir()
+    (root / "scripts" / "build").write_text("build_script")
+    subprocess.run(["git", "-C", str(root), "add", "scripts/build"], check=True)
+    assert bot._tree() == "scripts/build"
+    assert "build_script" in bot._read("scripts/build", 1, 150)
+
+
 def test_submodule_directory(root):
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run([
